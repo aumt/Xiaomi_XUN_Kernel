@@ -69,10 +69,16 @@ jobs:
       actions: write
       contents: write
     steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+
       - name: 设置构建参数
         id: ver
         run: |
           set -e
+          # ★ 这一步必须排在「检出源码」之后：UPSTREAM 是仓库里的文件，
+          #   放在 checkout 之前会 `./UPSTREAM: No such file or directory`。
+          #   （NX729J 那版这步能放最前，是因为它的版本参数是内联写死的。）
           # UPSTREAM 是版本参数的单一口径，scripts/fetch.sh 读的是同一份
           . ./UPSTREAM
           echo "upstream_branch=$UPSTREAM_BRANCH" >> "$GITHUB_OUTPUT"
@@ -85,9 +91,6 @@ jobs:
           echo "上游内核: $UPSTREAM_BRANCH @ $UPSTREAM_COMMIT"
           echo "ReSukiSU: $KSU_COMMIT"
           echo "特性: ${{ inputs.features }}   打包: ${{ inputs.package_ak3 }}"
-
-      - name: 检出源码
-        uses: actions/checkout@v4
 
       - name: 记录产物对应的提交
         id: built

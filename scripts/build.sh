@@ -2,26 +2,54 @@
 # 配置 + 硬闸 + make Image
 #   FEATURES=0  只编基线（stock 配置，不叠特性片段）
 #   FEATURES=1  叠 configs/xun-features.config（默认）
+#
+# 功能开关（关掉 = 把该组依赖从 .config 里删掉，依赖项由 olddefconfig 自动清理）：
+#   ENABLE_DROIDSPACES=0  Droidspaces 依赖：命名空间 + SYSVIPC
+#   ENABLE_DAED=0         daed 依赖：CO-RE 用的 BTF / IKHEADERS / BPF_JIT_ALWAYS_ON
+#   DISABLE_CONFIG="A B"  再手工追加要关的符号
+# 关掉的符号由硬闸 C 反向断言：「要求关」却仍是 =y（被别的项 select 拉回来）当场失败 ——
+# 少了这条，开关会「关了个寂寞」还不报错。
+#
+# ★ 开关只动 .config，不动 patches/：代码补丁始终叠加，没有对应配置时是死代码。
+# ★ daed 那组**故意不含** BPF_SYSCALL / BPF_JIT：原厂 12 个模块 import 的
+#   bpf_trace_run1..12 出自 kernel/trace/bpf_trace.c（BPF_EVENTS ← BPF_SYSCALL/BPF_JIT），
+#   关掉会直接踩「真缺口」闸门。别的机型的开关列表不能整份照抄过来。
 set -uo pipefail
 P="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 K="$P/kernel"; O="$P/out"
 FEATURES="${FEATURES:-1}"
 LOG="${BUILD_LOG:-$P/build.log}"
 JOBS="${JOBS:-$(nproc)}"
-CLANG_DIR="${CLANG_DIR:-/home/user/nx729j/clang-r450784d}"
+CLANG_DIR="${CLANG_DIR:-$P/clang}"
+ENABLE_DROIDSPACES="${ENABLE_DROIDSPACES:-1}"
+ENABLE_DAED="${ENABLE_DAED:-1}"
+
+[ -x "$CLANG_DIR/bin/clang" ] || {
+  echo "::error::找不到工具链 $CLANG_DIR/bin/clang —— 用 CLANG_DIR=<clang 解压目录> 指定（CI 放在仓库根 clang/）"
+  exit 1; }
 
 export PATH="$CLANG_DIR/bin:$PATH"
 export ARCH=arm64 SUBARCH=arm64
 export LLVM=1 LLVM_IAS=1
 export CROSS_COMPILE=aarch64-linux-gnu-
-export CCACHE_DIR="${CCACHE_DIR:-/home/user/xun/ccache}"
+export CCACHE_DIR="${CCACHE_DIR:-$P/ccache}"
 export CC="ccache clang"
 export TZ=Asia/Shanghai
 
 [ -d "$K" ] || { echo "::error::kernel/ 不存在，先跑 scripts/fetch.sh"; exit 1; }
 
+# ---- 按开关累积要关掉的符号 ----
+DISABLE="${DISABLE_CONFIG:-}"
+if [ "$ENABLE_DROIDSPACES" = "0" ]; then
+  DISABLE="$DISABLE SYSVIPC POSIX_MQUEUE IPC_NS PID_NS USER_NS"
+fi
+if [ "$ENABLE_DAED" = "0" ]; then
+  DISABLE="$DISABLE DEBUG_INFO_BTF IKHEADERS BPF_JIT_ALWAYS_ON"
+fi
+DISABLE="$(printf '%s' "$DISABLE" | tr -s ' \t' ' ' | sed 's/^ //; s/ $//')"
+
 {
-echo "===== 构建开始 $(date -Is)  FEATURES=$FEATURES  jobs=$JOBS ====="
+echo "===== 构建开始 $(date -Is)  FEATURES=$FEATURES  DROIDSPACES=$ENABLE_DROIDSPACES  DAED=$ENABLE_DAED  jobs=$JOBS ====="
 # 上限走 CCACHE_MAXSIZE（CI 设 3G —— GitHub 缓存有配额，堆太大存不上去），
 # 本地不设时才是 30G。写成硬编码 30G 会把 CI 设的值顶掉。
 echo "  ccache: dir=$CCACHE_DIR  max=${CCACHE_MAXSIZE:-30G}"
@@ -36,6 +64,17 @@ if [ "$FEATURES" != "0" ]; then
 fi
 # 关裁剪：让导出面成为原厂（TRIM_UNUSED_KSYMS=y）的超集
 scripts/config --file "$O/.config" -d TRIM_UNUSED_KSYMS
+
+# 功能开关要求关掉的符号
+if [ -n "$DISABLE" ]; then
+  echo "--- 按开关关掉符号 ---"
+  for S in $DISABLE; do
+    # ★ 一个符号一次调用：`scripts/config -d A B C` 只吃 A，B/C 被当成子命令，
+    #   只打印一行 "bad command" 而退出码仍是 0 —— 静默地只生效一部分。
+    scripts/config --file "$O/.config" -d "$S"
+    echo "  - CONFIG_$S"
+  done
+fi
 
 # ★ 必须带 CC=clang：否则 Kconfig 以为用 gcc ⇒ LD_IS_LLD 不成立
 #   ⇒ 自动 LTO_NONE=y 且 CFI_CLANG 连带消失 ⇒ CRC 与原厂不符、刷了开不了机。
@@ -61,12 +100,32 @@ if [ "$FEATURES" != "0" ] && [ -s "$P/configs/xun-features.config" ]; then
   miss=0
   while read -r sym; do
     [ -n "$sym" ] || continue
+    # 被开关有意关掉的移到硬闸 C 去反向断言，这里跳过
+    case " $DISABLE " in
+      *" $sym "*) echo "  - CONFIG_${sym}（开关要求关闭，不在本节回查）"; continue ;;
+    esac
     n=$(grep -c "^CONFIG_${sym}=y\$" "$O/.config")
     if [ "$n" != "1" ]; then echo "  ✗ CONFIG_${sym} 未落地"; miss=$((miss+1)); fi
   done < <(sed -n 's/^CONFIG_\([A-Za-z0-9_]*\)=y$/\1/p' "$P/configs/xun-features.config")
   echo "  未落地项 = $miss (须为0)"
   [ "$miss" = "0" ] || fail=1
 fi
+
+echo "--- 硬闸 C：开关要求关掉的符号确实关掉了 ---"
+if [ -n "$DISABLE" ]; then
+  for S in $DISABLE; do
+    n=$(grep -c "^CONFIG_${S}=y\$" "$O/.config")
+    if [ "$n" = "0" ]; then
+      echo "  CONFIG_${S}=y -> 0 (须为0)"
+    else
+      echo "  ✗ CONFIG_${S} 仍是 y —— 开关没生效（多半被别的项 select 拉回来了）"
+      fail=1
+    fi
+  done
+else
+  echo "  没有开关要求关闭的符号（跳过）"
+fi
+
 [ "$fail" = "0" ] || { echo "!! 硬闸失败，中止"; exit 1; }
 echo "--- 硬闸通过 ---"
 

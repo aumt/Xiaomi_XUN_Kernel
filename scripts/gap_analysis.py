@@ -13,8 +13,8 @@
 里 0 次、我方 symvers 里 0 次、而我方段内同样有，三条同时满足才是这类假阳性）。
 
 stock 侧来源两种（同 crc_check.py）：
-  1. 厂商 .ko 在场（本地）—— readelf 现算。
-  2. 不在场（CI）—— 读已固化的导出面清单 $XUN_MODULE_EXPORTS
+  1. 厂商 .ko 在场 —— readelf 现算。
+  2. 不在场 —— 读已固化的导出面清单 $XUN_MODULE_EXPORTS
      （缺省 configs/xun-stock-module-exports.txt，只有符号名，可公开）。
 
 用法:
@@ -27,8 +27,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
 
 STOCK_DIRS = [d for d in os.environ.get('XUN_STOCK_DIRS', '').split(':') if d] or [
-    '/home/user/xun/_recon/modules',
-    '/home/user/xun/_recon/vramdisk/lib/modules',
+    os.path.join(_ROOT, '_recon', 'modules'),
+    os.path.join(_ROOT, '_recon', 'vramdisk', 'lib', 'modules'),
 ]
 EXPORTS_TXT = os.environ.get('XUN_MODULE_EXPORTS') or os.path.join(
     _ROOT, 'configs', 'xun-stock-module-exports.txt')

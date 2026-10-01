@@ -79,7 +79,7 @@ UPSTREAM                版本参数的单一口径（上游提交 / ReSukiSU �
 configs/
   xun-stock.config      设备 /proc/config.gz（构建基准，勿改）
   xun-features.config   特性叠加片段（Droidspaces / ReSukiSU / SUSFS）
-  xun-built.config      已发布那版编出来的完整 .config（留档）
+  xun-built.config      干净 194 树上对 stock 配置做 olddefconfig 的结果（配置可行性对照）
   xun-stock-crc.tsv     ★ 原厂 469 个模块的 (符号, CRC) 基线，3414 条
   xun-stock-module-exports.txt
                         ★ 原厂模块彼此导出的符号集合（判「真缺口」用）
@@ -87,7 +87,7 @@ patches/                特性改动（按序号叠加到上游树）
 scripts/
   fetch.sh              克隆上游内核树与 ReSukiSU 到 kernel/
   apply.sh              在 kernel/ 上叠补丁（幂等）
-  build.sh              配置 + 硬闸 A/B + CRC/真缺口闸门 + make Image
+  build.sh              配置 + 硬闸 A/B/C + CRC/真缺口闸门 + make Image
   crc_check.py          CRC 闸门；--dump 可从厂商 .ko 重新生成基线
   gap_analysis.py       把「我方未导出」拆成模块自给 / 真缺口；--dump 同上
   package-ak3.sh        打 AnyKernel3 包
@@ -99,7 +99,7 @@ out/                    构建产物（不入库）
 
 ★ 那两个 `configs/xun-stock-*.{tsv,txt}` 是**纯数字/符号名**的基线，不含厂商代码 ——
 所以闸门能在没有厂商 `.ko` 的 CI 里跑，也不必把 131MB 的私有模块分发进仓库。
-本地有 `.ko` 时脚本优先现算，两者结论一致（实测 847 / 0 逐项相同）。
+自备厂商 `.ko` 时脚本优先现算，两者结论一致（实测 847 / 0 逐项相同）。
 
 ---
 
@@ -115,7 +115,9 @@ bash scripts/package-ak3.sh    # 出 AnyKernel3-XUN-*.zip
 ```
 
 `build.sh` 的环境变量：`CLANG_DIR`（工具链）、`CCACHE_DIR`、`BUILD_LOG`、
-`JOBS`、`FEATURES=0|1`（默认 1，0 = 只编基线不叠特性）。
+`JOBS`、`FEATURES=0|1`（默认 1，0 = 只编基线不叠特性）、
+`ENABLE_DROIDSPACES=0|1`、`ENABLE_DAED=0|1`（默认都是 1，关掉 = 把该组依赖从
+`.config` 里删掉，再由硬闸 C 反向断言确实删掉了）。
 
 ### GitHub Actions
 
@@ -125,16 +127,22 @@ Actions → **Build XUN Kernel (Redmi Pad SE)** → Run workflow。
 |---|---|---|
 | `package_ak3` | true | 打包 AnyKernel3；关掉就只出 `Image` |
 | `features` | true | 关掉 = 只编基线。**排查「刷了不开机是不是特性的锅」时用它**：基线能开机、特性版不能，问题就在特性里 |
+| `enable_droidspaces` | true | Droidspaces 依赖（SYSVIPC + IPC_NS / PID_NS / USER_NS 等命名空间）；关掉会编出跑不了容器的内核 |
+| `enable_daed` | true | daed 依赖（CO-RE 用的 `DEBUG_INFO_BTF` / `IKHEADERS` / `BPF_JIT_ALWAYS_ON`）；关掉 daed 的 BPF 程序加载不了 |
 | `ccache_update` | false | 换工具链 / 改配置后开启，刷新 ccache |
 | `create_release` | false | 构建成功后自动发 Release（默认关，产物走 artifact） |
 
-实测耗时：CI（4 核 / 16GB runner，**冷 ccache**）**30.6 分钟**；本地 Linux（16 核、热 ccache）22~29 分钟。
+实测耗时：CI（4 核 / 16GB runner，**冷 ccache**）**30.6 分钟**。
 FullLTO 的 `vmlinux` 链接是单线程，占大头且不吃 ccache，内存峰值顶到 ~15GB（16GB runner 上必须补 swap）。
 public 仓库的 Actions 额度不限，随便跑。
 
-> 版本串在 CI 里长这样：`5.15.194-g<上游提交号>`。CI 的补丁是打到工作树上的，
-> 树必然是脏的（否则会带 `-dirty`），workflow 里去掉了。它与本地开发时那份
-> （`-g<特性提交号>`）**字符串不同、代码相同** —— 两边都指向同一套补丁。
+> 版本串在 CI 里长这样：`5.15.194-g<上游提交号>`。补丁是打到工作树上的，
+> 树必然是脏的（否则会带 `-dirty`），workflow 里去掉了。
+
+> ⚠️ 两个开关的代码补丁**始终叠加**，不受开关影响 —— 配置关掉时补丁是死代码。
+> `enable_daed` 那组**故意不含** `BPF_SYSCALL` / `BPF_JIT`：原厂 12 个模块 import 的
+> `bpf_trace_run1..12` 出自 `kernel/trace/bpf_trace.c`（`BPF_EVENTS` ← `BPF_SYSCALL`/`BPF_JIT`），
+> 关掉会直接踩「真缺口」闸门。
 
 ---
 
@@ -169,13 +177,7 @@ AnyKernel3 会自己判断当前槽位（A/B），只换 `boot` 里的内核，*
 
 ---
 
-## 6. 状态与已知的坑
-
-见 [`STATUS.md`](STATUS.md)：闸门实测数据、验收记录、移植过程中踩过的坑逐条列在那儿。
-
----
-
-## 7. 致谢
+## 6. 致谢
 
 - [Xiaomi-Redmi-Pad-SE-Resources](https://github.com/Xiaomi-Redmi-Pad-SE-Resources) —— 上游内核树
 - [ReSukiSU](https://github.com/ReSukiSU/ReSukiSU) —— 内核级 root

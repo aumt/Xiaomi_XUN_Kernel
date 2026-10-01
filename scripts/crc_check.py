@@ -6,8 +6,9 @@
     crc_check.py --dump [目标.tsv]            从厂商 .ko 固化基线 TSV
 
 stock 侧的来源有两种：
-  1. 有厂商 .ko（本地开发机）—— 解析每个 .ko 的 __versions 段，合并。
-     目录由 $XUN_STOCK_DIRS 给出（冒号分隔），缺省见下。
+  1. 有厂商 .ko —— 解析每个 .ko 的 __versions 段，合并。
+     目录由 $XUN_STOCK_DIRS 给出（冒号分隔），缺省 <仓库根>/_recon/{modules,
+     vramdisk/lib/modules}（放本地抽取出来的厂商模块，不入库）。
   2. 没有 .ko（CI）—— 读已固化的 TSV 基线（$XUN_STOCK_CRC，
      缺省 configs/xun-stock-crc.tsv）。基线里只有「符号名 + CRC 数字」，
      不含厂商代码，所以能随仓库公开分发。
@@ -24,8 +25,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
 
 DIRS = [d for d in os.environ.get('XUN_STOCK_DIRS', '').split(':') if d] or [
-    '/home/user/xun/_recon/modules',
-    '/home/user/xun/_recon/vramdisk/lib/modules',
+    os.path.join(_ROOT, '_recon', 'modules'),
+    os.path.join(_ROOT, '_recon', 'vramdisk', 'lib', 'modules'),
 ]
 TSV = os.environ.get('XUN_STOCK_CRC') or os.path.join(_ROOT, 'configs', 'xun-stock-crc.tsv')
 RESULT_JSON = os.environ.get('XUN_CRC_RESULT') or os.path.join(_ROOT, 'out', 'crc_result.json')

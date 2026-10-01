@@ -20,6 +20,13 @@ name: Build XUN Kernel (Redmi Pad SE)
 #         所以构建前去掉了，最终形态是 5.15.194-g<上游提交号>。
 #         ★ 它与本地开发时那份（-g<特性提交号>）字符串不同、代码相同。
 #
+# 功能开关：enable_droidspaces / enable_daed 关掉时，scripts/build.sh 会把该组依赖
+#           从 .config 里删掉（olddefconfig 顺手清理依赖项），再由硬闸 C 反向断言
+#           「要求关的确实关了」。代码补丁不受开关影响，始终叠加。
+#           ★ daed 那组不含 BPF_SYSCALL / BPF_JIT：原厂 12 个模块 import 的
+#             bpf_trace_run1..12 出自 kernel/trace/bpf_trace.c（BPF_EVENTS ←
+#             BPF_SYSCALL/BPF_JIT），关掉会直接踩「真缺口」闸门。
+#
 # 自动发布：默认关闭。构建成功后在 Actions 页面手动下载 artifact，
 #           或重跑一次并把 create_release 打开（tag 会指向本次实际编译的提交）。
 
@@ -45,6 +52,16 @@ on:
         default: true
       features:
         description: '叠加特性（关掉=只编基线，用于排查「刷了不开机是不是特性的锅」）'
+        required: true
+        type: boolean
+        default: true
+      enable_droidspaces:
+        description: 'Droidspaces 依赖（SYSVIPC + IPC_NS/PID_NS/USER_NS 等命名空间）；关掉会编出跑不了容器的内核'
+        required: true
+        type: boolean
+        default: true
+      enable_daed:
+        description: 'daed 依赖（CO-RE 用的 DEBUG_INFO_BTF / IKHEADERS / BPF_JIT_ALWAYS_ON）；关掉 daed 的 BPF 程序加载不了'
         required: true
         type: boolean
         default: true
@@ -89,7 +106,6 @@ jobs:
           set -e
           # ★ 这一步必须排在「检出源码」之后：UPSTREAM 是仓库里的文件，
           #   放在 checkout 之前会 `./UPSTREAM: No such file or directory`。
-          #   （NX729J 那版这步能放最前，是因为它的版本参数是内联写死的。）
           # UPSTREAM 是版本参数的单一口径，scripts/fetch.sh 读的是同一份
           . ./UPSTREAM
           echo "upstream_branch=$UPSTREAM_BRANCH" >> "$GITHUB_OUTPUT"
@@ -102,6 +118,7 @@ jobs:
           echo "上游内核: $UPSTREAM_BRANCH @ $UPSTREAM_COMMIT"
           echo "ReSukiSU: $KSU_COMMIT"
           echo "特性: ${{ inputs.features }}   打包: ${{ inputs.package_ak3 }}"
+          echo "开关: droidspaces=${{ inputs.enable_droidspaces }}  daed=${{ inputs.enable_daed }}"
 
       - name: 记录产物对应的提交
         id: built
@@ -242,7 +259,7 @@ jobs:
           # 两刀，各带断言：
           #   1) 掐掉 -dirty 的产生源（setlocalversion 里的 `printf '%s' -dirty`）
           #   2) 兜底：输出前再过滤一遍（.scmversion 缓存里可能已经带上了）
-          # 这棵树的 scripts/setlocalversion 与 NX729J 那棵同构，所以同样两刀。
+          # 这两刀针对 ACK 5.15 系 setlocalversion 的通用形态。
           sed -i 's/ -dirty//g' scripts/setlocalversion
           sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' scripts/setlocalversion
           bash -n scripts/setlocalversion
@@ -285,13 +302,16 @@ jobs:
           sudo sysctl -w vm.swappiness=100 || true
           echo "=== swap 后 ==="; free -m; swapon --show
 
-      - name: 编译内核（含硬闸 A/B + CRC / 真缺口闸门）
+      - name: 编译内核（含硬闸 A/B/C + CRC / 真缺口闸门）
         run: |
           set -e
           export CLANG_DIR="$PWD/clang"
           export BUILD_LOG="$PWD/build.log"
           export JOBS="$(nproc)"
           export FEATURES="${{ inputs.features && 1 || 0 }}"
+          # 功能开关：关掉时 build.sh 会把该组依赖从 .config 里删掉，硬闸 C 反向断言确实删掉了
+          export ENABLE_DROIDSPACES="${{ inputs.enable_droidspaces && 1 || 0 }}"
+          export ENABLE_DAED="${{ inputs.enable_daed && 1 || 0 }}"
           echo "=== 资源状态 ==="; free -m; df -h /; nproc
           # build.sh 自己 tee 到 build.log，所以日志是实时流出去的：
           # runner 若被内存掐掉，连 if: always() 的步骤都会被跳过、artifact 传不上去，
@@ -322,8 +342,17 @@ jobs:
           echo "  形态正确"
           if [ "${{ inputs.features }}" = "true" ]; then
             echo "=== 特性确实编进去了 ==="
-            nm out/vmlinux | grep -qE ' T bpf_loop$' || { echo "::error::vmlinux 里没有 bpf_loop"; exit 1; }
-            echo "  bpf_loop ✅"
+            # bpf_loop 的代码补丁始终叠加，但 kernel/bpf/helpers.c 只在
+            # CONFIG_BPF_SYSCALL=y 时才编 —— 关掉 daed 开关后符号本就该消失，
+            # 所以这里正反两个方向都断言。
+            if [ "${{ inputs.enable_daed }}" = "true" ]; then
+              nm out/vmlinux | grep -qE ' T bpf_loop$' || { echo "::error::vmlinux 里没有 bpf_loop"; exit 1; }
+              echo "  bpf_loop ✅"
+            elif nm out/vmlinux 2>/dev/null | grep -qE ' T bpf_loop$'; then
+              echo "::error::enable_daed=false，bpf_loop 不该还在 vmlinux 里"; exit 1
+            else
+              echo "  bpf_loop 已随 daed 开关关闭 ✅"
+            fi
             strings -a "$IMG" | grep -oE 'ReSukiSU-[A-Za-z0-9._%-]+' | sort -u | sed 's/^/  KSU 串: /'
             strings -a "$IMG" | grep -q 'ReSukiSU-5.15-XUN-' || { echo "::error::Image 里没有 KSU 版本串"; exit 1; }
             echo "  ReSukiSU ✅"
@@ -395,8 +424,8 @@ jobs:
           * 运行环境：LineageOS 23.0 (Android 16)，厂商模块来自小米 OS2.0.205.0.VMUMIXM
           * KSU 分支：ReSukiSU（${{ steps.ver.outputs.ksu_commit }}）
           * SUSFS 支持：${{ inputs.features }}
-          * Droidspaces 容器支持（SYSVIPC / 命名空间 / kABI）：${{ inputs.features }}
-          * bpf_loop 回填 + BPF 回调 CFI 修复（daed 所需）：${{ inputs.features }}
+          * Droidspaces 容器支持（SYSVIPC / 命名空间 / kABI）：${{ inputs.enable_droidspaces }}
+          * daed 依赖（bpf_loop 回填 + BPF 回调 CFI + BTF/IKHEADERS）：${{ inputs.enable_daed }}
           * CRC 闸门：与原厂 469 个模块的 __crc_* 逐项比对，不符数为 0 才发
           * ReSukiSU 管理器下载：[ReSukiSU_CI](https://github.com/cctv18/ReSukiSU_CI/releases)
 

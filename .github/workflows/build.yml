@@ -113,7 +113,7 @@ jobs:
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           echo "  产物对应提交: $SHA"
 
-      - name: 安装依赖 + 下载 AOSP clang
+      - name: 安装依赖
         run: |
           set -e
           # ★ 先 update：runner 镜像里的 apt lists 是建镜像那天抓的，放久了
@@ -124,16 +124,78 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             make gcc flex bison bc \
             binutils python-is-python3 libssl-dev libelf-dev libdw-dev dwarves ccache zip unzip
+          pahole --version | head -n1
+
+      - name: 载入 clang 缓存
+        # 缓存的是解压好的 clang/。命中就完全不碰 googlesource ——
+        # 那是这条流水线上唯一的外部单点，且实测会对匿名拉取回 503。
+        id: clang-cache
+        uses: actions/cache@v4
+        with:
+          path: clang
+          key: clang-${{ env.CLANG_VER }}-${{ runner.os }}
+
+      - name: 下载 AOSP clang
+        if: steps.clang-cache.outputs.cache-hit != 'true'
+        run: |
+          set -e
           # clang-r450784d = android13-5.15 时代 clang-14，与设备在机内核
           # （r450784e / LLD 14.0.7）同族。googlesource 上 r450784e 拿不到，故用 d。
-          echo "正在下载 clang-${CLANG_VER} ..."
-          mkdir -p clang
-          curl -fL "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/tags/android-platform-13.0.0_r28/clang-${CLANG_VER}.tar.gz" -o clang.tar.gz
-          tar -xzf clang.tar.gz -C clang
+          #
+          # ★ 必须重试 + 多引用递补：run 36890281870 就死在这一句上 ——
+          #   curl: (22) The requested URL returned error: 503。
+          #   同一个 URL 我这边 HEAD 探测是 200，runner 上直接 503（googlesource 限流）。
+          #   curl 的 --retry 默认就认 408/429/500/502/503/504 为可重试，
+          #   所以故意不加 --retry-all-errors：那样连 404 也会重试，白等 6 轮；
+          #   不加则 404 立即失败、马上换下一个引用。
+          #   下面这 7 个引用是同一个文件的 5 个 tag + 2 个分支，实测都返 200。
+          REFS=(
+            "refs/tags/android-platform-13.0.0_r28"
+            "refs/tags/android-platform-13.0.0_r25"
+            "refs/tags/android-13.0.0_r28"
+            "refs/tags/android-platform-13.0.0_r1"
+            "refs/tags/android-13.0.0_r3"
+            "refs/heads/android13-release"
+            "refs/heads/android13-qpr3-release"
+          )
+          BASE="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive"
+          ok=0
+          for r in "${REFS[@]}"; do
+            echo "  试 $r"
+            if curl -fL --retry 5 --retry-delay 15 --retry-max-time 900 \
+                 --connect-timeout 20 --max-time 1200 \
+                 "$BASE/$r/clang-${CLANG_VER}.tar.gz" -o clang.tar.gz; then
+              echo "  ✅ 拿到：$(du -h clang.tar.gz | cut -f1)"
+              ok=1; break
+            fi
+            echo "    这个引用不通，换下一个"
+            rm -f clang.tar.gz
+          done
+          [ "$ok" = "1" ] || { echo "::error::7 个引用全拿不到 clang，googlesource 又不通了"; exit 1; }
+          # 解到临时目录再改名：这样下载失败/解压半截时不会留下半个 clang/，
+          # 被 actions/cache 的收尾步骤当成好缓存存起来（存了就成了毒缓存，
+          # 而且同名 key 不会再被覆盖）。
+          rm -rf clang.tmp clang
+          mkdir -p clang.tmp
+          tar -xzf clang.tar.gz -C clang.tmp
           rm -f clang.tar.gz
+          mv clang.tmp clang
+
+      - name: 校验工具链可用
+        run: |
+          set -e
           clang/bin/clang --version | head -n1
           clang/bin/ld.lld --version | head -n1
-          pahole --version | head -n1 || true
+          clang/bin/llvm-objcopy --version | head -n1
+          pahole --version | head -n1
+          # 断言落在 14.x：这棵树的 ABI 敏感（CRC 要逐个对上原厂模块），
+          # 工具链大版本不是能悄悄漂的东西。缓存若存坏了，这里当场拦住，
+          # 不会等到编了 60 分钟才在产物校验那步才发现。
+          clang/bin/clang --version | head -n1 | grep -qE 'clang version 14\.' \
+            || { echo "::error::clang 不是 14.x（设备在机内核是 r450784e / 14.0.7）"; exit 1; }
+          clang/bin/ld.lld --version | head -n1 | grep -qE 'LLD 14\.' \
+            || { echo "::error::ld.lld 不是 14.x"; exit 1; }
+          echo "  工具链 OK"
 
       - name: 配置 ccache
         run: |

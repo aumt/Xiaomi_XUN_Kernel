@@ -58,7 +58,7 @@ on:
         required: true
         type: boolean
         default: false
-  # 想让 push 自动触发就打开下面这几行。注意一次构建要 60~90 分钟，
+  # 想让 push 自动触发就打开下面这几行。注意一次构建约 30 分钟（实测冷 ccache 30.6 分钟），
   # 所以用 paths 挡住只改文档的提交。
   # push:
   #   branches: [ main ]

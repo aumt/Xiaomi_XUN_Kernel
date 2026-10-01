@@ -19,7 +19,8 @@
 | 机型 | Redmi Pad SE `23073RPBFC`，device `xun`，SoC SM6225 |
 | 系统 | LineageOS 23.0（**UNOFFICIAL**，`23.0-20251020_232542-UNOFFICIAL-xun`），Android 16 |
 | 厂商基线 | 小米 stock `OS2.0.205.0.VMUMIXM`（Android 13） |
-| 在机内核 | `5.15.167-android13-8-00014-gbf0a81a7f319-ab13297889`，clang r450784e / LLD 14.0.7 |
+| 原厂内核（LineageOS 直接复用） | `5.15.167-android13-8-00014-gbf0a81a7f319-ab13297889`，clang r450784e / LLD 14.0.7 |
+| 本仓库产物 | `5.15.194-g<提交号>`，clang r450784d / LLD 14.0.6 |
 | 分区 | A/B；`boot_a` 只有内核（`ramdisk_size=0`，47,372,800 B），ramdisk 在 `init_boot_a` |
 | KMI | `android13-8`（与 `module_layout = 0x222dd63` 一致） |
 | 工具链 | AOSP LLVM `clang-r450784d`（clang / LLD 14.0.6） |
@@ -127,7 +128,8 @@ Actions → **Build XUN Kernel (Redmi Pad SE)** → Run workflow。
 | `ccache_update` | false | 换工具链 / 改配置后开启，刷新 ccache |
 | `create_release` | false | 构建成功后自动发 Release（默认关，产物走 artifact） |
 
-一次构建约 60~90 分钟（FullLTO 的 `vmlinux` 链接是单线程，占大头，且不吃 ccache）。
+实测耗时：CI（4 核 / 16GB runner，**冷 ccache**）**30.6 分钟**；本地 Linux（16 核、热 ccache）22~29 分钟。
+FullLTO 的 `vmlinux` 链接是单线程，占大头且不吃 ccache，内存峰值顶到 ~15GB（16GB runner 上必须补 swap）。
 public 仓库的 Actions 额度不限，随便跑。
 
 > 版本串在 CI 里长这样：`5.15.194-g<上游提交号>`。CI 的补丁是打到工作树上的，

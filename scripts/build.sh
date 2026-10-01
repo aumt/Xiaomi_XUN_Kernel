@@ -22,7 +22,10 @@ export TZ=Asia/Shanghai
 
 {
 echo "===== 构建开始 $(date -Is)  FEATURES=$FEATURES  jobs=$JOBS ====="
-ccache -M 30G 2>&1 | tail -2
+# 上限走 CCACHE_MAXSIZE（CI 设 3G —— GitHub 缓存有配额，堆太大存不上去），
+# 本地不设时才是 30G。写成硬编码 30G 会把 CI 设的值顶掉。
+echo "  ccache: dir=$CCACHE_DIR  max=${CCACHE_MAXSIZE:-30G}"
+ccache -M "${CCACHE_MAXSIZE:-30G}" 2>&1 | tail -2
 cd "$K" || exit 1
 
 echo "--- 配置 ---"

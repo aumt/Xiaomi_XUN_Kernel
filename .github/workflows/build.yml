@@ -26,6 +26,14 @@ name: Build XUN Kernel (Redmi Pad SE)
 env:
   TZ: Asia/Shanghai
   CLANG_VER: r450784d
+  # ★ CCACHE_DIR 定在 job 级，不靠 GITHUB_ENV 写。
+  #   下面 actions/cache 的 `with: path:` 读的是 ${{ env.CCACHE_DIR }} ——
+  #   workflow/job 级 env 一定在 env 上下文里；靠 GITHUB_ENV 现写的值则不保证
+  #   能被 ${{ }} 读到，读到空串就是「缓存存了个寂寞」，而且不报错。
+  #   值取自 runner 用户的 HOME（ubuntu-24.04 runner 上是 /home/runner）；
+  #   下面「配置 ccache」那步会用 `$CCACHE_DIR = $HOME/.ccache` 断言兜住，
+  #   哪天基础镜像换了 HOME，当场失败而不是静默缓存空目录。
+  CCACHE_DIR: /home/runner/.ccache
 
 on:
   workflow_dispatch:
@@ -63,7 +71,10 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # 钉住具体版本而不写 ubuntu-latest：这棵树的 ABI 敏感（CRC 必须逐个对上原厂模块），
+    # 工具链/基础镜像换代要由我们决定，不能被 latest 悄悄推着走。
+    # ubuntu-24.04 就是当前 ubuntu-latest 指向的镜像。
+    runs-on: ubuntu-24.04
     timeout-minutes: 240
     permissions:
       actions: write
@@ -105,8 +116,14 @@ jobs:
       - name: 安装依赖 + 下载 AOSP clang
         run: |
           set -e
+          # ★ 先 update：runner 镜像里的 apt lists 是建镜像那天抓的，放久了
+          #   包版本会从源上撤掉 => `apt-get install` 直接 404 Not Found。CI 经典死法。
+          #   这里不加 --no-upgrade：本机那套「已装包绝不升级」是给长期使用的开发机定的，
+          #   而 runner 一次性、用完即弃，卡住依赖解析反而会硬失败。
+          sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            binutils python-is-python3 libssl-dev libelf-dev libdw-dev bc dwarves ccache zip unzip
+            make gcc flex bison bc \
+            binutils python-is-python3 libssl-dev libelf-dev libdw-dev dwarves ccache zip unzip
           # clang-r450784d = android13-5.15 时代 clang-14，与设备在机内核
           # （r450784e / LLD 14.0.7）同族。googlesource 上 r450784e 拿不到，故用 d。
           echo "正在下载 clang-${CLANG_VER} ..."
@@ -121,14 +138,25 @@ jobs:
       - name: 配置 ccache
         run: |
           set -e
-          echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
-          echo "CCACHE_MAXSIZE=3G" >> "$GITHUB_ENV"
-          echo "CCACHE_COMPILERCHECK=none" >> "$GITHUB_ENV"
-          echo "CCACHE_NOHASHDIR=true" >> "$GITHUB_ENV"
-          mkdir -p "$HOME/.ccache"
+          # CCACHE_DIR 来自 job 级 env，这里断言它确实落在 HOME 下
+          [ "$CCACHE_DIR" = "$HOME/.ccache" ] \
+            || { echo "::error::CCACHE_DIR=$CCACHE_DIR 与 \$HOME/.ccache=$HOME/.ccache 不一致，缓存会存错目录"; exit 1; }
+          mkdir -p "$CCACHE_DIR"
+          # ★ 这几项必须在「当前步骤内」export：GITHUB_ENV 写的值对当前步骤不生效，
+          #   只对后续步骤生效。原来只写 GITHUB_ENV 就直接 ccache -M，
+          #   命令打到的是 ccache 默认目录（~/.cache/ccache），跟要缓存的那个不是同一个。
+          export CCACHE_MAXSIZE=3G CCACHE_COMPILERCHECK=none CCACHE_NOHASHDIR=true
           ccache -M 3G
           ccache -o compression=true
           ccache -s
+          echo "  --- 生效中的配置 ---"
+          ccache -p | grep -E 'cache_dir|max_size|compiler_check|hash_dir' | sed 's/^/    /'
+          # 供后续步骤（编译内核）用；这一步之后 GITHUB_ENV 是生效的
+          {
+            echo "CCACHE_MAXSIZE=3G"
+            echo "CCACHE_COMPILERCHECK=none"
+            echo "CCACHE_NOHASHDIR=true"
+          } >> "$GITHUB_ENV"
 
       - name: 载入 ccache 缓存
         uses: actions/cache@v4

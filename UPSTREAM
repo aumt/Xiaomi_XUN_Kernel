@@ -1,1 +1,12 @@
+# 版本参数的单一口径：scripts/fetch.sh 与 CI 都读这里。
+# 这份文件是 shell 片段（会被 . 进去），改完请 `bash -n UPSTREAM` 验一下语法。
+
+# 上游内核树：小米平板 SE (xun, SM6225) 的 lineage-23.0 派生，5.15.194
+UPSTREAM_REPO=https://github.com/Xiaomi-Redmi-Pad-SE-Resources/android_kernel_xiaomi_sm6225.git
+UPSTREAM_BRANCH=lineage-23.0
 UPSTREAM_COMMIT=676f5fa0e5617e95d5c5d10ac605206536376845
+
+# ReSukiSU：KernelSU/kernel/Kbuild 用 `git rev-list --count HEAD` 当版本号，
+# 所以只能全量克隆；改这个提交号会同时改变内核里内嵌的 KSU 版本串。
+KSU_REPO=https://github.com/ReSukiSU/ReSukiSU.git
+KSU_COMMIT=3a2745f78ab68e61c02a0681463021952083ec8c

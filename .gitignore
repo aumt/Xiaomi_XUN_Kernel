@@ -1,12 +1,16 @@
-# 上游内核工作树（CI/本地按 UPSTREAM_COMMIT 克隆，不入库）
+# 上游内核工作树（CI/本地按 UPSTREAM 里的提交克隆，不入库）
 /kernel/
 
 # 构建产物
 /out/
 /anykernel3/
+/clang/
 *.log
 *.zip
+compiled.config
 
 # 本地侦察/中间产物
 /_recon/
 /ccache/
+__pycache__/
+*.pyc

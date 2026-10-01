@@ -94,16 +94,39 @@ else
 fi
 
 if [ -s "$SYM" ]; then
+  # ★ 闸门必须真的能拦住。写成 `python3 … | grep …` 的话，$? 是 grep 的退出码，
+  #   脚本报「CRC 不符」也照样 0 通过 —— 闸门形同虚设。所以落盘再判。
   echo "--- CRC 闸门 ---"
-  python3 "$P/scripts/crc_check.py" "$SYM" 2>&1 | grep -E '^\[stock|^\[ours|CRC 一致|CRC 不符|未导出' || true
-  if [ "${GATE_GAP:-0}" = "1" ]; then
-    echo "--- 真缺口闸门（把「未导出」拆成模块自给 / 真缺口）---"
-    python3 "$P/scripts/gap_analysis.py" 2>&1 | grep -E '模块自己导出|A\)|B\)' || true
+  python3 "$P/scripts/crc_check.py" "$SYM" > "$O/crc_gate.txt" 2>&1
+  CRC_RC=$?
+  grep -E '^\[stock|^\[ours|CRC 一致|CRC 不符|未导出' "$O/crc_gate.txt" || true
+  if [ "$CRC_RC" != "0" ]; then
+    echo "!! CRC 闸门失败：stock 模块 import 的 __crc_* 与我们不符，刷进去模块会装不上"
+    sed -n '/CRC 不符明细/,/未导出明细/p' "$O/crc_gate.txt" | head -35
+    RC=1
+  fi
+
+  echo "--- 真缺口闸门（把「未导出」拆成模块自给 / 真缺口）---"
+  python3 "$P/scripts/gap_analysis.py" > "$O/gap_gate.txt" 2>&1
+  GAP_RC=$?
+  grep -E '模块自己导出|A\)|B\)' "$O/gap_gate.txt" || true
+  if [ "$GAP_RC" != "0" ]; then
+    echo "!! 真缺口闸门失败：有符号只能由 vmlinux 提供而我们没导出，模块会 Unknown symbol"
+    sed -n '/真缺口全量/,$p' "$O/gap_gate.txt" | head -30
+    RC=1
   fi
 fi
 echo "  ---- 版本串 ----"
 strings -a "$O/arch/arm64/boot/Image" 2>/dev/null | grep -oE '5\.15\.[0-9]+[-A-Za-z0-9._+]*' | sort -u | head -5
 echo "===== 构建结束 $(date -Is) rc=$RC ====="
-} > "$LOG" 2>&1
+} 2>&1 | tee "$LOG"
+# ★ 用 PIPESTATUS[0] 取左边那段（构建本体）的退出码。写成
+#     } > "$LOG" 2>&1 ; tail -1 "$LOG"
+#   的话脚本退出码恒为 tail 的 0 —— 硬闸失败、make 失败在 CI 里全被吞掉，
+#   会「绿着」发出一个编坏的内核。tee 同时让 CI 日志实时可见：
+#   runner 若被内存掐掉，连 if: always() 的步骤都会被跳过，
+#   只有已经流式发出去的日志行能活下来。
+RC=${PIPESTATUS[0]}
 echo "日志：$LOG"
-tail -1 "$LOG"
+echo "构建退出码 = $RC"
+exit "$RC"

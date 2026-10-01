@@ -1,0 +1,325 @@
+name: Build XUN Kernel (Redmi Pad SE)
+
+# 红米平板 SE（Redmi Pad SE，代号 xun，SM6225 / 骁龙 680），LineageOS 23.0 (Android 16)
+#
+# 这一版内核只替换 boot 里的 Image，不动 ramdisk（GKI v4：ramdisk 在 init_boot）。
+# 设备树 TARGET_NO_KERNEL_OVERRIDE=true，系统用的是小米原厂模块，所以
+# 「CRC 必须逐个对得上」是能不能开机的硬条件 —— 见下面 CRC 闸门。
+#
+# 版本参数一律读仓库根的 UPSTREAM 文件（与 scripts/fetch.sh 同一口径），
+# 改基线只需改那一个文件。
+#
+# 关于 LTO：绝不关 LTO。关掉会连带关掉 CFI_CLANG，符号 CRC 与原厂不符 -> 刷了不开机。
+#           scripts/build.sh 里有硬闸 A 挡住这个（要求 LTO_CLANG_FULL/CFI_CLANG/
+#           MODVERSIONS/LD_IS_LLD 等为 y 且 LTO_NONE/LTO_CLANG_THIN 为 n）。
+#           代价是 FullLTO 链接内存峰值高，需要 public 仓库的 4 核/16GB runner，
+#           并补一块 swap 兜底。
+#
+# 版本串：CI 里补丁是打到工作树上的，树必然是脏的 -> UTS_RELEASE 会带 -dirty。
+#         功能上无害（带 CRC 时 same_magic() 会跳过 UTS_RELEASE），但不好认，
+#         所以构建前去掉了，最终形态是 5.15.194-g<上游提交号>。
+#         ★ 它与本地开发时那份（-g<特性提交号>）字符串不同、代码相同。
+#
+# 自动发布：默认关闭。构建成功后在 Actions 页面手动下载 artifact，
+#           或重跑一次并把 create_release 打开（tag 会指向本次实际编译的提交）。
+
+env:
+  TZ: Asia/Shanghai
+  CLANG_VER: r450784d
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_ak3:
+        description: '打包 AnyKernel3 刷机包（不打包就只出 Image）'
+        required: true
+        type: boolean
+        default: true
+      features:
+        description: '叠加特性（关掉=只编基线，用于排查「刷了不开机是不是特性的锅」）'
+        required: true
+        type: boolean
+        default: true
+      ccache_update:
+        description: '更新 ccache 缓存（换工具链/改配置后开启）'
+        required: true
+        type: boolean
+        default: false
+      create_release:
+        description: '构建成功后自动发布 GitHub Release'
+        required: true
+        type: boolean
+        default: false
+  # 想让 push 自动触发就打开下面这几行。注意一次构建要 60~90 分钟，
+  # 所以用 paths 挡住只改文档的提交。
+  # push:
+  #   branches: [ main ]
+  #   paths:
+  #     - 'patches/**'
+  #     - 'configs/**'
+  #     - 'scripts/**'
+  #     - 'UPSTREAM'
+  #     - '.github/workflows/build.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    permissions:
+      actions: write
+      contents: write
+    steps:
+      - name: 设置构建参数
+        id: ver
+        run: |
+          set -e
+          # UPSTREAM 是版本参数的单一口径，scripts/fetch.sh 读的是同一份
+          . ./UPSTREAM
+          echo "upstream_branch=$UPSTREAM_BRANCH" >> "$GITHUB_OUTPUT"
+          echo "upstream_commit=$UPSTREAM_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "ksu_commit=$KSU_COMMIT" >> "$GITHUB_OUTPUT"
+          echo "tag=XUN-build-$(TZ=Asia/Shanghai date +%y%m%d%H%M)" >> "$GITHUB_OUTPUT"
+          # ccache 的键只需要固定「工具链 + 上游树」；源码变了 ccache 自己会失效重算，
+          # 不必把补丁内容算进键里（算进去的话每改一个补丁就丢一次缓存）。
+          echo "ccache_key=xun-${CLANG_VER}-${UPSTREAM_COMMIT}" >> "$GITHUB_OUTPUT"
+          echo "上游内核: $UPSTREAM_BRANCH @ $UPSTREAM_COMMIT"
+          echo "ReSukiSU: $KSU_COMMIT"
+          echo "特性: ${{ inputs.features }}   打包: ${{ inputs.package_ak3 }}"
+
+      - name: 检出源码
+        uses: actions/checkout@v4
+
+      - name: 记录产物对应的提交
+        id: built
+        run: |
+          # ★ Release 的 tag 必须指向「产物对应的代码」。不给 --target 时 gh 用的是
+          #   仓库默认分支，万一编译期间分支又前进，tag 里的代码就和产物对不上了。
+          #   这里把 checkout 后的 HEAD 固化下来。
+          SHA=$(git rev-parse HEAD)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "  产物对应提交: $SHA"
+
+      - name: 安装依赖 + 下载 AOSP clang
+        run: |
+          set -e
+          sudo apt-get install -y --no-install-recommends \
+            binutils python-is-python3 libssl-dev libelf-dev libdw-dev bc dwarves ccache zip unzip
+          # clang-r450784d = android13-5.15 时代 clang-14，与设备在机内核
+          # （r450784e / LLD 14.0.7）同族。googlesource 上 r450784e 拿不到，故用 d。
+          echo "正在下载 clang-${CLANG_VER} ..."
+          mkdir -p clang
+          curl -fL "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/tags/android-platform-13.0.0_r28/clang-${CLANG_VER}.tar.gz" -o clang.tar.gz
+          tar -xzf clang.tar.gz -C clang
+          rm -f clang.tar.gz
+          clang/bin/clang --version | head -n1
+          clang/bin/ld.lld --version | head -n1
+          pahole --version | head -n1 || true
+
+      - name: 配置 ccache
+        run: |
+          set -e
+          echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_MAXSIZE=3G" >> "$GITHUB_ENV"
+          echo "CCACHE_COMPILERCHECK=none" >> "$GITHUB_ENV"
+          echo "CCACHE_NOHASHDIR=true" >> "$GITHUB_ENV"
+          mkdir -p "$HOME/.ccache"
+          ccache -M 3G
+          ccache -o compression=true
+          ccache -s
+
+      - name: 载入 ccache 缓存
+        uses: actions/cache@v4
+        id: ccache-restore
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ steps.ver.outputs.ccache_key }}-${{ runner.os }}
+          restore-keys: |
+            ${{ steps.ver.outputs.ccache_key }}-
+
+      - name: 拉上游内核树 + ReSukiSU
+        run: bash scripts/fetch.sh
+
+      - name: 叠补丁
+        run: bash scripts/apply.sh
+
+      - name: 去掉版本串里的 -dirty
+        run: |
+          set -e
+          cd kernel
+          # 两刀，各带断言：
+          #   1) 掐掉 -dirty 的产生源（setlocalversion 里的 `printf '%s' -dirty`）
+          #   2) 兜底：输出前再过滤一遍（.scmversion 缓存里可能已经带上了）
+          # 这棵树的 scripts/setlocalversion 与 NX729J 那棵同构，所以同样两刀。
+          sed -i 's/ -dirty//g' scripts/setlocalversion
+          sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' scripts/setlocalversion
+          bash -n scripts/setlocalversion
+          grep -q -- "printf '%s' -dirty" scripts/setlocalversion && { echo "::error::第一刀没生效，-dirty 还是会产生"; exit 1; }
+          tail -2 scripts/setlocalversion | grep -q "sed 's/-dirty//g'" || { echo "::error::第二刀没生效"; exit 1; }
+          echo "  setlocalversion 已改造，尾 3 行:"
+          tail -3 scripts/setlocalversion
+
+      - name: 准备 swap（FullLTO 链接内存峰值兜底）
+        run: |
+          set -e
+          echo "=== swap 前 ==="; free -m; df -h /
+          avail=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
+          echo "根分区可用: ${avail}G"
+          SIZE=""
+          if   [ "${avail:-0}" -ge 60 ]; then SIZE=24G
+          elif [ "${avail:-0}" -ge 36 ]; then SIZE=16G
+          elif [ "${avail:-0}" -ge 24 ]; then SIZE=8G
+          fi
+          if [ -z "$SIZE" ]; then
+            echo "!! 磁盘不足 24G，跳过 swap（内存峰值风险自负）"; free -m; exit 0
+          fi
+          echo "选定 swap 大小: $SIZE"
+          # ★ runner 镜像自带的 swap 就在 /swapfile（只有 3G），与本步骤同路径。
+          #   写成「已存在就跳过」的话，16G 从未真正建立、等于没加。
+          #   所以按大小比对，不够就先 swapoff 再重建。
+          CUR=$(swapon --show=NAME,SIZE --noheadings 2>/dev/null | awk '$1=="/swapfile"{print $2; exit}')
+          if [ -n "$CUR" ] && [ "${CUR%G}" -ge "${SIZE%G}" ] 2>/dev/null; then
+            echo "现有 /swapfile 已是 $CUR >= $SIZE，无需重建"
+          else
+            echo "现有 /swapfile: ${CUR:-无} -> 重建为 $SIZE"
+            sudo swapoff /swapfile 2>/dev/null || true
+            sudo rm -f /swapfile
+            sudo fallocate -l "$SIZE" /swapfile || \
+              sudo dd if=/dev/zero of=/swapfile bs=1M count=$(( ${SIZE%G} * 1024 )) status=none
+            sudo chmod 600 /swapfile
+            sudo mkswap /swapfile
+            sudo swapon /swapfile
+          fi
+          sudo sysctl -w vm.swappiness=100 || true
+          echo "=== swap 后 ==="; free -m; swapon --show
+
+      - name: 编译内核（含硬闸 A/B + CRC / 真缺口闸门）
+        run: |
+          set -e
+          export CLANG_DIR="$PWD/clang"
+          export BUILD_LOG="$PWD/build.log"
+          export JOBS="$(nproc)"
+          export FEATURES="${{ inputs.features && 1 || 0 }}"
+          echo "=== 资源状态 ==="; free -m; df -h /; nproc
+          # build.sh 自己 tee 到 build.log，所以日志是实时流出去的：
+          # runner 若被内存掐掉，连 if: always() 的步骤都会被跳过、artifact 传不上去，
+          # 只有已经发出去的日志行能活下来。
+          bash scripts/build.sh
+
+      - name: 校验产物（版本串 / 特性 / 无 -dirty）
+        run: |
+          set -e
+          IMG=out/arch/arm64/boot/Image
+          [ -s "$IMG" ] || { echo "::error::没有 Image"; exit 1; }
+          echo "=== 版本串 ==="
+          VER=$(strings -a "$IMG" | grep -oE 'Linux version [0-9][^ ]*' | sed 's/^Linux version //' | sort -u)
+          echo "$VER" | sed 's/^/  /'
+          [ -n "$VER" ] || { echo "::error::Image 里抽不到 'Linux version <版本号>'"; exit 1; }
+          echo "=== 不许带 -dirty ==="
+          if strings -a "$IMG" | grep -q -- '-dirty'; then
+            echo "::error::版本串里还有 -dirty —— 去 -dirty 那一步没生效"
+            exit 1
+          fi
+          echo "  干净"
+          echo "=== 版本串形态：5.15.x-g<12位提交号> ==="
+          # 用形态而不是硬写 5.15.194 —— 上游 SUBLEVEL 变了不该让校验跟着改。
+          # 这条同时挡住两件事：.scmversion 重复拼接（会拼成 5.15.1945.15.194-g…）
+          # 和 -dirty 残留（上面已单独查，这里再兜一次）。
+          printf '%s\n' "$VER" | grep -qE '^5\.15\.[0-9]+-g[0-9a-f]{12}$' \
+            || { echo "::error::版本串形态不对：'$VER'（期望 5.15.x-g<12位提交号>）"; exit 1; }
+          echo "  形态正确"
+          if [ "${{ inputs.features }}" = "true" ]; then
+            echo "=== 特性确实编进去了 ==="
+            nm out/vmlinux | grep -qE ' T bpf_loop$' || { echo "::error::vmlinux 里没有 bpf_loop"; exit 1; }
+            echo "  bpf_loop ✅"
+            strings -a "$IMG" | grep -oE 'ReSukiSU-[A-Za-z0-9._%-]+' | sort -u | sed 's/^/  KSU 串: /'
+            strings -a "$IMG" | grep -q 'ReSukiSU-5.15-XUN-' || { echo "::error::Image 里没有 KSU 版本串"; exit 1; }
+            echo "  ReSukiSU ✅"
+          else
+            echo "=== 基线构建（未叠特性），跳过特性校验 ==="
+          fi
+          cp out/.config ./compiled.config
+
+      - name: 上传诊断日志（无论成败）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diag-${{ github.run_id }}
+          path: |
+            build.log
+            out/crc_gate.txt
+            out/gap_gate.txt
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: 保存 ccache 缓存
+        if: inputs.ccache_update || steps.ccache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ steps.ver.outputs.ccache_key }}-${{ runner.os }}
+
+      - name: 打包 AnyKernel3 刷机包
+        if: inputs.package_ak3
+        id: ak3
+        run: |
+          set -e
+          bash scripts/package-ak3.sh
+          # 包名由 package-ak3.sh 输出，这里转成 output 供后面几步用
+          NAME=$(ls -1t AnyKernel3-XUN-*.zip | head -1)
+          [ -n "$NAME" ] || { echo "::error::没生成刷机包"; exit 1; }
+          echo "ak3name=$NAME" >> "$GITHUB_OUTPUT"
+          sha256sum "$NAME"
+
+      - name: 上传工件
+        uses: actions/upload-artifact@v4
+        with:
+          name: XUN-Image-${{ github.run_id }}
+          path: |
+            out/arch/arm64/boot/Image
+            compiled.config
+            AnyKernel3-XUN-*.zip
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: 发布 GitHub Release
+        if: ${{ inputs.create_release && inputs.package_ak3 }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          IMG=out/arch/arm64/boot/Image
+          VER_ACTUAL=$(strings -a "$IMG" | grep -oE '5\.15\.[0-9]+(-[A-Za-z0-9._+-]+)*' | sort -u \
+                       | awk 'length > max { max = length; best = $0 } END { print best }')
+          [ -n "$VER_ACTUAL" ] || { echo "::error::抽不到版本串，拒绝发布"; exit 1; }
+          TAG="${{ steps.ver.outputs.tag }}"
+          cat > release_body.md <<EOF
+          ### 📱 红米平板 SE (XUN) ReSukiSU 内核 | 构建信息
+
+          * 内核版本号：${VER_ACTUAL}
+          * 编译时间：$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M') (CST)
+          * 机型：红米平板 SE (Redmi Pad SE / xun / SM6225)，A/B 槽，仅替换 boot 分区
+          * 上游基线：lineage-23.0 @ ${{ steps.ver.outputs.upstream_commit }}
+          * 运行环境：LineageOS 23.0 (Android 16)，厂商模块来自小米 OS2.0.205.0.VMUMIXM
+          * KSU 分支：ReSukiSU（${{ steps.ver.outputs.ksu_commit }}）
+          * SUSFS 支持：${{ inputs.features }}
+          * Droidspaces 容器支持（SYSVIPC / 命名空间 / kABI）：${{ inputs.features }}
+          * bpf_loop 回填 + BPF 回调 CFI 修复（daed 所需）：${{ inputs.features }}
+          * CRC 闸门：与原厂 469 个模块的 __crc_* 逐项比对，不符数为 0 才发
+          * ReSukiSU 管理器下载：[ReSukiSU_CI](https://github.com/cctv18/ReSukiSU_CI/releases)
+
+          #### ※※※ 刷写内核有风险，可能导致无法开机、WiFi/指纹异常等。刷写前务必备份 boot 分区（TWRP 或 Android 工具箱）。刷入后如遇问题请回刷原 boot.img。※※※
+          EOF
+          # --target 必须显式给：默认会落到仓库默认分支，tag 里的代码就和产物对不上。
+          TARGET="${{ steps.built.outputs.sha }}"
+          [ -n "$TARGET" ] || { echo "::error::拿不到产物提交 sha，拒绝发布"; exit 1; }
+          echo "=== 发布 $TAG（--target $TARGET）==="
+          gh release create "$TAG" AnyKernel3-XUN-*.zip \
+            --repo "$GITHUB_REPOSITORY" --target "$TARGET" \
+            --title "XUN-build-$VER_ACTUAL" --notes-file release_body.md
+          echo "=== 已发布: https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG ==="
+          # 发布后核实 tag 真指向产物对应的提交（只告警不失败，Release 已经发出去了）
+          TAG_SHA=$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha 2>/dev/null || true)
+          echo "  核实: tag $TAG -> ${TAG_SHA:-（取不到）}"
+          if [ "$TAG_SHA" != "$TARGET" ]; then
+            echo "::warning::tag 实际指向 ${TAG_SHA:-空}，与产物提交 $TARGET 不一致"
+          fi

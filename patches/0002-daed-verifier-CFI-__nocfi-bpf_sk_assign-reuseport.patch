@@ -1,0 +1,179 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: aumt <aumt@users.noreply.github.com>
+Date: Thu, 1 Oct 2026 21:53:48 +0800
+Subject: [PATCH] =?UTF-8?q?daed=20=E6=95=B0=E6=8D=AE=E9=9D=A2=E4=BF=AE?=
+ =?UTF-8?q?=E5=A4=8D=EF=BC=9Averifier=20=E7=99=BD=E5=90=8D=E5=8D=95=20/=20?=
+ =?UTF-8?q?=E5=9B=9E=E8=B0=83=20CFI=20=5F=5Fnocfi=20/=20bpf=5Fsk=5Fassign?=
+ =?UTF-8?q?=20=E6=94=BE=E8=A1=8C=20reuseport?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- verifier.c: is_callback_calling_function() 补 BPF_FUNC_loop。
+  ACK 5.15 的 verifier 比 5.17 新，照抄 5.17 的 bpf_loop 补丁必然漏掉这条：
+  __check_func_call 里 set_callee_state_cb != set_callee_state 的守卫命中，
+  报 'verifier bug: helper bpf_loop#181 is not marked as callback-calling' + EFAULT。
+- include/linux/bpf.h: 新增 noinline __nocfi 的 bpf_call_callback()，
+  四个调用点（bpf_iter/arraymap/hashtab/helpers）改走它。
+  JITed 子程序不在 CFI shadow 覆盖内，内核 C 直接间接调用会 CFI abort
+  => panic => smp_send_stop 瞬时静默 + 约 35s 后 PMIC 硬复位。
+- net/core/filter.c: 删掉 bpf_sk_assign 对 SO_REUSEPORT 的 -ESOCKTNOSUPPORT 拒绝，
+  保留 sk_unhashed 等其余检查。5.15 上 daed 的 tproxy 监听器带 SO_REUSEPORT，
+  每次 assign 必失败且调用方丢弃返回值，代理完全不通。
+---
+ include/linux/bpf.h   | 17 +++++++++++++++++
+ kernel/bpf/arraymap.c |  2 +-
+ kernel/bpf/bpf_iter.c |  4 ++--
+ kernel/bpf/hashtab.c  |  2 +-
+ kernel/bpf/helpers.c  |  4 ++--
+ kernel/bpf/verifier.c |  3 ++-
+ net/core/filter.c     | 31 +++++++++++++++++++++++++++++--
+ 7 files changed, 54 insertions(+), 9 deletions(-)
+
+diff --git a/include/linux/bpf.h b/include/linux/bpf.h
+index dceecd585..97c99419e 100644
+--- a/include/linux/bpf.h
++++ b/include/linux/bpf.h
+@@ -27,6 +27,23 @@
+ 
+ typedef int (*bpf_callback_t)(u64, u64, u64, u64, u64);
+ 
++/*
++ * Callbacks handed to helpers such as bpf_loop() are JITed BPF subprograms,
++ * and JITed code is not covered by the CFI shadow.  Without __nocfi the
++ * indirect call below is reported as a CFI failure, which aborts the kernel
++ * unless CONFIG_CFI_PERMISSIVE is set -- the same reason
++ * bpf_dispatcher_*_func() is marked __nocfi.
++ *
++ * Keep this out of line: the annotation has to sit on the function that
++ * contains the call, and inlining it into a sanitized caller would let the
++ * check reappear.
++ */
++static noinline __nocfi __maybe_unused
++u64 bpf_call_callback(void *fn, u64 a, u64 b, u64 c, u64 d, u64 e)
++{
++	return ((u64 (*)(u64, u64, u64, u64, u64))fn)(a, b, c, d, e);
++}
++
+ struct bpf_verifier_env;
+ struct bpf_verifier_log;
+ struct perf_event;
+diff --git a/kernel/bpf/arraymap.c b/kernel/bpf/arraymap.c
+index a632526ce..05febad91 100644
+--- a/kernel/bpf/arraymap.c
++++ b/kernel/bpf/arraymap.c
+@@ -677,7 +677,7 @@ static int bpf_for_each_array_elem(struct bpf_map *map, void *callback_fn,
+ 			val = array->value + array->elem_size * i;
+ 		num_elems++;
+ 		key = i;
+-		ret = BPF_CAST_CALL(callback_fn)((u64)(long)map,
++		ret = bpf_call_callback(callback_fn, (u64)(long)map,
+ 					(u64)(long)&key, (u64)(long)val,
+ 					(u64)(long)callback_ctx, 0);
+ 		/* return value: 0 - continue, 1 - stop and return */
+diff --git a/kernel/bpf/bpf_iter.c b/kernel/bpf/bpf_iter.c
+index b7aef5b34..a73e270fd 100644
+--- a/kernel/bpf/bpf_iter.c
++++ b/kernel/bpf/bpf_iter.c
+@@ -721,7 +721,6 @@ const struct bpf_func_proto bpf_for_each_map_elem_proto = {
+ BPF_CALL_4(bpf_loop, u32, nr_loops, void *, callback_fn, void *, callback_ctx,
+ 	   u64, flags)
+ {
+-	bpf_callback_t callback = (bpf_callback_t)callback_fn;
+ 	u64 ret;
+ 	u32 i;
+ 
+@@ -731,7 +730,8 @@ BPF_CALL_4(bpf_loop, u32, nr_loops, void *, callback_fn, void *, callback_ctx,
+ 		return -E2BIG;
+ 
+ 	for (i = 0; i < nr_loops; i++) {
+-		ret = callback((u64)i, (u64)(long)callback_ctx, 0, 0, 0);
++		ret = bpf_call_callback(callback_fn, (u64)i,
++					(u64)(long)callback_ctx, 0, 0, 0);
+ 		/* return value: 0 - continue, 1 - stop and return */
+ 		if (ret)
+ 			return i + 1;
+diff --git a/kernel/bpf/hashtab.c b/kernel/bpf/hashtab.c
+index cddc063c8..645bb727c 100644
+--- a/kernel/bpf/hashtab.c
++++ b/kernel/bpf/hashtab.c
+@@ -2112,7 +2112,7 @@ static int bpf_for_each_hash_elem(struct bpf_map *map, void *callback_fn,
+ 				val = elem->key + roundup_key_size;
+ 			}
+ 			num_elems++;
+-			ret = BPF_CAST_CALL(callback_fn)((u64)(long)map,
++			ret = bpf_call_callback(callback_fn, (u64)(long)map,
+ 					(u64)(long)key, (u64)(long)val,
+ 					(u64)(long)callback_ctx, 0);
+ 			/* return value: 0 - continue, 1 - stop and return */
+diff --git a/kernel/bpf/helpers.c b/kernel/bpf/helpers.c
+index 9f4fb26ef..cac3303a2 100644
+--- a/kernel/bpf/helpers.c
++++ b/kernel/bpf/helpers.c
+@@ -1102,8 +1102,8 @@ static enum hrtimer_restart bpf_timer_cb(struct hrtimer *hrtimer)
+ 		key = value - round_up(map->key_size, 8);
+ 	}
+ 
+-	BPF_CAST_CALL(callback_fn)((u64)(long)map, (u64)(long)key,
+-				   (u64)(long)value, 0, 0);
++	bpf_call_callback(callback_fn, (u64)(long)map, (u64)(long)key,
++			  (u64)(long)value, 0, 0);
+ 	/* The verifier checked that return value is zero. */
+ 
+ 	this_cpu_write(hrtimer_running, NULL);
+diff --git a/kernel/bpf/verifier.c b/kernel/bpf/verifier.c
+index fea0642fa..26c04138d 100644
+--- a/kernel/bpf/verifier.c
++++ b/kernel/bpf/verifier.c
+@@ -520,7 +520,8 @@ static bool is_ptr_cast_function(enum bpf_func_id func_id)
+ static bool is_callback_calling_function(enum bpf_func_id func_id)
+ {
+ 	return func_id == BPF_FUNC_for_each_map_elem ||
+-	       func_id == BPF_FUNC_timer_set_callback;
++	       func_id == BPF_FUNC_timer_set_callback ||
++	       func_id == BPF_FUNC_loop;
+ }
+ 
+ static bool is_cmpxchg_insn(const struct bpf_insn *insn)
+diff --git a/net/core/filter.c b/net/core/filter.c
+index f346f19cf..c48c974a9 100644
+--- a/net/core/filter.c
++++ b/net/core/filter.c
+@@ -7136,8 +7136,35 @@ BPF_CALL_3(bpf_sk_assign, struct sk_buff *, skb, struct sock *, sk, u64, flags)
+ 		return -EOPNOTSUPP;
+ 	if (unlikely(dev_net(skb->dev) != sock_net(sk)))
+ 		return -ENETUNREACH;
+-	if (unlikely(sk_fullsock(sk) && sk->sk_reuseport))
+-		return -ESOCKTNOSUPPORT;
++	/*
++	 * NX729J: SO_REUSEPORT sockets are assignable here.
++	 *
++	 * Upstream refuses them (cf7fbe660f2d, 8e368dc72e86) because
++	 * bpf_sk_lookup_*() picks from a reuseport group by hash without
++	 * running the SK_REUSEPORT program, so the assignment could land on
++	 * the "wrong" socket.  Support only arrived in 6.6 with 9c02bec95954
++	 * ("bpf, net: Support SO_REUSEPORT sockets with bpf_sk_assign"), and
++	 * that commit does not stand alone: it builds on earlier patches of
++	 * the same series which add inet_lookup_reuseport() and change
++	 * skb_steal_sock() to report whether the socket was "prefetched".
++	 *
++	 * daed (dae) needs the relaxation: its tproxy listeners are created
++	 * with SO_REUSEPORT so that the old and new control plane can overlap
++	 * during a reload, but it looks its own listener up in its sockmap
++	 * rather than letting the stack hash-select a group member, and no
++	 * SK_REUSEPORT program is involved -- so the ambiguity above cannot
++	 * arise.  Without this, every assignment failed with -ESOCKTNOSUPPORT
++	 * on 5.15, and control/kern/tproxy.c discards that return value, so
++	 * interception silently blackholed every captured flow.
++	 *
++	 * The refcount contract below needs no change either: every hashed
++	 * listener carries SOCK_RCU_FREE (__inet_hash()), and so does every
++	 * bound UDP socket (udp_lib_get_port()) -- reuseport plays no part in
++	 * that, and connected children have the flag cleared again
++	 * (inet_connection_sock.c).  sk_is_refcounted() is therefore false
++	 * here, no reference is taken, and skb_steal_sock() reaches the same
++	 * conclusion from the sock_pfree destructor.
++	 */
+ 	if (sk_unhashed(sk))
+ 		return -EOPNOTSUPP;
+ 	if (sk_is_refcounted(sk) &&

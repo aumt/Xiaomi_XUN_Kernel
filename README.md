@@ -185,3 +185,14 @@ AnyKernel3 会自己判断当前槽位（A/B），只换 `boot` 里的内核，*
 - [osm0sis/AnyKernel3](https://github.com/osm0sis/AnyKernel3) —— 卡刷包框架
 - [Droidspaces](https://github.com/ravindu644/Droidspaces-OSS) —— 容器化支持
 - [cctv18](https://github.com/cctv18) —— ReSukiSU 管理器构建与若干补丁思路
+
+---
+
+## 7. 许可证
+
+本仓库以 **GPL-3.0** 发布，全文见 [LICENSE](LICENSE)。
+
+但仓库里的东西**不是同一个许可**：`patches/` 改的是 GPL-2.0-only 的内核代码，
+`patches/0003` 里 SUSFS 的三份新增文件是 GPL-3.0，刷机包里还打进了 AnyKernel3
+及其若干第三方二进制。**逐项清单见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)** ——
+其中包含「GPL-2.0-only 内核 + GPL-3.0 SUSFS 互不兼容」这一点，请一并看完。

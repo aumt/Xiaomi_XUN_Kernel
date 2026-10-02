@@ -2139,10 +2139,24 @@ index 2a37f9f3d..b0294c384 100644
  	if (!error)
 diff --git a/fs/susfs.c b/fs/susfs.c
 new file mode 100644
-index 000000000..af4904f5b
+index 000000000..3e35c2de425d80efca176fd96364bbbd5660d599
 --- /dev/null
 +++ b/fs/susfs.c
-@@ -0,0 +1,1468 @@
+@@ -0,0 +1,1482 @@
++// SPDX-License-Identifier: GPL-3.0-only
++/*
++ * SUSFS — 内核级 root 隐藏。上游项目 SUSFS4KSU：
++ *         https://gitlab.com/simonpunk/susfs4ksu
++ *
++ * 来源: 上游 kernel_patches/fs/susfs.c，对应版本 SUSFS_VERSION "v2.2.0"
++ *       （版本号定义见 include/linux/susfs.h）。
++ * 许可: GPL-3.0。上游仓库根 LICENSE 为 GPLv3 全文；上游未在源文件内
++ *       逐文件声明，此处按 GPL-3.0-only 处理。
++ * 改动: 有。为适配本内核树（5.15 与配套 KernelSU 的 SUSFS 接口）作过
++ *       修改，与上游 v2.2.0 并非逐字一致，差异见本仓库提交历史。
++ * 注意: 本内核树整体为 GPL-2.0-only（仓库根 COPYING），与 GPL-3.0
++ *       互不兼容；此处如实标注上游许可，不代表合并分发在法律上成立。
++ */
 +#include <linux/version.h>
 +#include <linux/cred.h>
 +#include <linux/fs.h>
@@ -3613,10 +3627,24 @@ index 000000000..af4904f5b
 +
 diff --git a/include/linux/susfs.h b/include/linux/susfs.h
 new file mode 100644
-index 000000000..6ede62945
+index 000000000..de4ef2c45f956418ba2b15639b013f5b5ad589f3
 --- /dev/null
 +++ b/include/linux/susfs.h
-@@ -0,0 +1,241 @@
+@@ -0,0 +1,255 @@
++// SPDX-License-Identifier: GPL-3.0-only
++/*
++ * SUSFS — 内核级 root 隐藏。上游项目 SUSFS4KSU：
++ *         https://gitlab.com/simonpunk/susfs4ksu
++ *
++ * 来源: 上游 kernel_patches/include/linux/susfs.h，对应版本 SUSFS_VERSION "v2.2.0"
++ *       （版本号定义见 include/linux/susfs.h）。
++ * 许可: GPL-3.0。上游仓库根 LICENSE 为 GPLv3 全文；上游未在源文件内
++ *       逐文件声明，此处按 GPL-3.0-only 处理。
++ * 改动: 有。为适配本内核树（5.15 与配套 KernelSU 的 SUSFS 接口）作过
++ *       修改，与上游 v2.2.0 并非逐字一致，差异见本仓库提交历史。
++ * 注意: 本内核树整体为 GPL-2.0-only（仓库根 COPYING），与 GPL-3.0
++ *       互不兼容；此处如实标注上游许可，不代表合并分发在法律上成立。
++ */
 +#ifndef KSU_SUSFS_H
 +#define KSU_SUSFS_H
 +
@@ -3860,10 +3888,24 @@ index 000000000..6ede62945
 +#endif
 diff --git a/include/linux/susfs_def.h b/include/linux/susfs_def.h
 new file mode 100644
-index 000000000..9fd5e2135
+index 000000000..41364ca85eb6d0ecdf6c22c4c7dc50aebd896c39
 --- /dev/null
 +++ b/include/linux/susfs_def.h
-@@ -0,0 +1,156 @@
+@@ -0,0 +1,170 @@
++// SPDX-License-Identifier: GPL-3.0-only
++/*
++ * SUSFS — 内核级 root 隐藏。上游项目 SUSFS4KSU：
++ *         https://gitlab.com/simonpunk/susfs4ksu
++ *
++ * 来源: 上游 kernel_patches/include/linux/susfs_def.h，对应版本 SUSFS_VERSION "v2.2.0"
++ *       （版本号定义见 include/linux/susfs.h）。
++ * 许可: GPL-3.0。上游仓库根 LICENSE 为 GPLv3 全文；上游未在源文件内
++ *       逐文件声明，此处按 GPL-3.0-only 处理。
++ * 改动: 有。为适配本内核树（5.15 与配套 KernelSU 的 SUSFS 接口）作过
++ *       修改，与上游 v2.2.0 并非逐字一致，差异见本仓库提交历史。
++ * 注意: 本内核树整体为 GPL-2.0-only（仓库根 COPYING），与 GPL-3.0
++ *       互不兼容；此处如实标注上游许可，不代表合并分发在法律上成立。
++ */
 +#ifndef KSU_SUSFS_DEF_H
 +#define KSU_SUSFS_DEF_H
 +
